@@ -13,6 +13,8 @@ The system is composed of the following main components:
 5. **Supporting Services**: Redis, MongoDB, and MQTT for data management
 6. **API Server**: Exposes defect data through a RESTful API
 
+<img width="620" alt="image" src="https://github.com/user-attachments/assets/6d08c814-895e-4332-8780-32810d0cefa1" />
+
 ## Repository Structure
 
 ```
