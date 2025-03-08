@@ -236,6 +236,13 @@ The system is designed to scale to very large solar farms:
 - Traceability of requests through the system
 - Playbooks for common failure scenarios
 
+## Other Features We May Enhance Based On Processing Capacity
+
+Compute Acceleration: The AI acceleration chip with high TOPS/s would dramatically accelerate the thermal image analysis and multi-sensor fusion capabilities. The system currently uses TensorFlow models for defect detection that would benefit from hardware acceleration.
+Energy Efficiency: Since solar farms are often in remote locations, the energy-efficient nature of the AI accelerated chip is ideal for edge deployments without requiring significant power infrastructure.
+Edge Processing: Moving the AI processor component directly to the edge would reduce latency and bandwidth requirements, enabling real-time defect detection without needing constant connectivity.
+Scaling: The system could handle more panels and higher-resolution thermal imaging with dedicated AI hardware acceleration.
+
 ## Future Roadmap
 
 The system is designed for ongoing enhancement:
