@@ -13,9 +13,10 @@ The system is composed of the following main components:
 5. **Supporting Services**: Redis, MongoDB, and MQTT for data management
 6. **API Server**: Exposes defect data through a RESTful API
 
-** Estimated planning on motherboard
+## Estimated planning on motherboard
 
-<img width="620" alt="image" src="https://github.com/user-attachments/assets/6d08c814-895e-4332-8780-32810d0cefa1" />
+<img width="1346" alt="image" src="https://github.com/user-attachments/assets/9f89ba65-9b9e-42cb-80df-9ef635661715" />
+
 
 ** Topology of Solar grid stations
 
