@@ -1,6 +1,6 @@
 # Solar Farm Defect Detection System
 
-This repository contains Kubernetes manifests for deploying a solar panel defect detection system that uses various sensors and AI processing to identify, classify, and recommend solutions for solar panel defects.
+This repository contains Kubernetes manifests for deploying a solar panel defect detection system that uses various sensors and AI processing to identify, classify, and recommend solutions for solar panel defects. This design will be injected using light weight kubernetes K3s. To begin with project uses kubernetes k8s, later on will be quantized to 8-bit application
 
 ## System Architecture
 
@@ -13,12 +13,12 @@ The system is composed of the following main components:
 5. **Supporting Services**: Redis, MongoDB, and MQTT for data management
 6. **API Server**: Exposes defect data through a RESTful API
 
-## Estimated planning on motherboard
+## Functional pods on motherboard
 
 <img width="1346" alt="image" src="https://github.com/user-attachments/assets/9f89ba65-9b9e-42cb-80df-9ef635661715" />
 
 
-** Topology of Solar grid stations
+## Topology Of Solar Panel Grid Station
 
 <img width="432" alt="image" src="https://github.com/user-attachments/assets/95890808-d422-4063-93fa-38b9a22c1e34" />
 
