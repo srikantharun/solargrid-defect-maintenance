@@ -5,7 +5,9 @@
 The Solar Farm Defect Detection and Management System is a comprehensive solution for monitoring, detecting, analyzing, and managing defects in solar panel installations. Leveraging multiple sensor types and artificial intelligence, the system provides real-time detection of various defects that can impact solar panel efficiency and longevity.
 
 This document outlines the complete system architecture, components, and workflows for the solar farm defect detection solution.
-![Uploading image.png…]()
+
+<img width="620" alt="image" src="https://github.com/user-attachments/assets/2f8f01c6-ae6c-4427-80a5-64eb94e9f77b" />
+
 
 
 ## Business Value
