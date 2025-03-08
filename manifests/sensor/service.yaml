@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sensor-service
+  namespace: solar-panel-detection
+spec:
+  selector:
+    app: sensor
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP

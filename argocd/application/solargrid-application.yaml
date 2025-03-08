@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: solargrid-defect-detection
+  namespace: argocd
+spec:
+  project: solargrid-project
+  source:
+    repoURL: https://github.com/yourusername/solar-farm-defect-detection
+    targetRevision: HEAD
+    path: manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: solar-panel-detection
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true

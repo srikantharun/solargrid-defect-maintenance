@@ -1,0 +1,649 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: solar-panel-detection
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+    spec:
+      containers:
+      - name: api-server
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install flask requests redis flask-cors flask-swagger-ui && 
+          mkdir -p /app && 
+          cat > /app/server.py << 'EOF'
+          import os
+          import json
+          import logging
+          from datetime import datetime
+          from flask import Flask, request, jsonify
+          import requests
+          import redis
+          from flask_cors import CORS
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('api-server')
+
+          # Configuration from environment variables
+          REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
+          REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+          AI_PROCESSOR_URL = os.environ.get('AI_PROCESSOR_URL', 'http://ai-processor-service:8081')
+          DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080')
+          API_PORT = int(os.environ.get('API_PORT', '8000'))
+          ENABLE_SWAGGER = os.environ.get('ENABLE_SWAGGER', 'true').lower() == 'true'
+
+          # Flask application
+          app = Flask(__name__)
+          CORS(app)  # Enable CORS for all routes
+
+          # Global variables
+          redis_client = None
+
+          # Initialize connections
+          def init_redis():
+              global redis_client
+              
+              # Connect to Redis
+              try:
+                  redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+                  redis_client.ping()  # Test the connection
+                  logger.info(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+                  return True
+              except Exception as e:
+                  logger.error(f"Failed to connect to Redis: {e}")
+                  redis_client = None
+                  return False
+
+          # API routes
+
+          @app.route('/api/health', methods=['GET'])
+          def health_check():
+              """API health check endpoint."""
+              health = {
+                  "status": "ok",
+                  "timestamp": datetime.now().isoformat(),
+                  "redis_connected": redis_client is not None,
+                  "services": {
+                      "ai_processor": "unknown",
+                      "data_collector": "unknown"
+                  }
+              }
+              
+              # Check AI processor connection
+              try:
+                  response = requests.get(f"{AI_PROCESSOR_URL}/panels/status", timeout=2)
+                  health["services"]["ai_processor"] = "up" if response.status_code == 200 else "down"
+              except:
+                  health["services"]["ai_processor"] = "down"
+              
+              # Check data collector connection
+              try:
+                  response = requests.get(f"{DATA_COLLECTOR_URL}/latest/temperature", timeout=2)
+                  health["services"]["data_collector"] = "up" if response.status_code == 200 else "down"
+              except:
+                  health["services"]["data_collector"] = "down"
+              
+              # Determine overall health
+              if (not redis_client or 
+                  health["services"]["ai_processor"] == "down" or 
+                  health["services"]["data_collector"] == "down"):
+                  health["status"] = "degraded"
+              
+              return jsonify(health)
+
+          @app.route('/api/panel/<panel_id>/defects', methods=['GET'])
+          def get_panel_defects(panel_id):
+              """Get defects for a specific panel."""
+              try:
+                  response = requests.get(f"{AI_PROCESSOR_URL}/panel/{panel_id}/defects")
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error retrieving panel defects: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/panel/<panel_id>/analyze', methods=['POST'])
+          def analyze_panel(panel_id):
+              """Trigger analysis for a specific panel."""
+              try:
+                  location_code = request.args.get('location_code', 'unknown')
+                  response = requests.post(
+                      f"{AI_PROCESSOR_URL}/panel/{panel_id}/analysis",
+                      params={"location_code": location_code}
+                  )
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error triggering panel analysis: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/panel/<panel_id>/data', methods=['GET'])
+          def get_panel_data(panel_id):
+              """Get latest sensor data for a specific panel."""
+              try:
+                  response = requests.get(f"{DATA_COLLECTOR_URL}/panel/{panel_id}")
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error retrieving panel data: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/location/<location_code>/data', methods=['GET'])
+          def get_location_data(location_code):
+              """Get latest sensor data for a specific location."""
+              try:
+                  response = requests.get(f"{DATA_COLLECTOR_URL}/latest/location/{location_code}")
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error retrieving location data: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/defects/recent', methods=['GET'])
+          def get_recent_defects():
+              """Get recent defects from all panels."""
+              try:
+                  response = requests.get(f"{DATA_COLLECTOR_URL}/defects/recent")
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error retrieving recent defects: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/defects/summary', methods=['GET'])
+          def get_defects_summary():
+              """Get a summary of all defects."""
+              try:
+                  response = requests.get(f"{AI_PROCESSOR_URL}/defects/summary")
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error retrieving defects summary: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/panels/status', methods=['GET'])
+          def get_panels_status():
+              """Get status of all panels."""
+              try:
+                  response = requests.get(f"{AI_PROCESSOR_URL}/panels/status")
+                  return jsonify(response.json()), response.status_code
+              except Exception as e:
+                  logger.error(f"Error retrieving panels status: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/api/documentation', methods=['GET'])
+          def get_api_docs():
+              """Get API documentation."""
+              docs = {
+                  "api_version": "1.0",
+                  "title": "Solar Panel Defect Detection API",
+                  "description": "API for detecting defects in solar panels using sensor data",
+                  "base_url": "/api",
+                  "endpoints": [
+                      {
+                          "path": "/health",
+                          "method": "GET",
+                          "description": "Check API health"
+                      },
+                      {
+                          "path": "/panel/{panel_id}/defects",
+                          "method": "GET",
+                          "description": "Get defects for a specific panel",
+                          "parameters": [
+                              {
+                                  "name": "panel_id",
+                                  "in": "path",
+                                  "required": true,
+                                  "description": "ID of the panel to retrieve defects for"
+                              }
+                          ]
+                      },
+                      {
+                          "path": "/panel/{panel_id}/analyze",
+                          "method": "POST",
+                          "description": "Trigger analysis for a specific panel",
+                          "parameters": [
+                              {
+                                  "name": "panel_id",
+                                  "in": "path",
+                                  "required": true,
+                                  "description": "ID of the panel to analyze"
+                              },
+                              {
+                                  "name": "location_code",
+                                  "in": "query",
+                                  "required": false,
+                                  "description": "Location code of the panel"
+                              }
+                          ]
+                      },
+                      {
+                          "path": "/panel/{panel_id}/data",
+                          "method": "GET",
+                          "description": "Get latest sensor data for a specific panel",
+                          "parameters": [
+                              {
+                                  "name": "panel_id",
+                                  "in": "path",
+                                  "required": true,
+                                  "description": "ID of the panel to retrieve data for"
+                              }
+                          ]
+                      },
+                      {
+                          "path": "/location/{location_code}/data",
+                          "method": "GET",
+                          "description": "Get latest sensor data for a specific location",
+                          "parameters": [
+                              {
+                                  "name": "location_code",
+                                  "in": "path",
+                                  "required": true,
+                                  "description": "Location code to retrieve data for"
+                              }
+                          ]
+                      },
+                      {
+                          "path": "/defects/recent",
+                          "method": "GET",
+                          "description": "Get recent defects from all panels"
+                      },
+                      {
+                          "path": "/defects/summary",
+                          "method": "GET",
+                          "description": "Get a summary of all defects"
+                      },
+                      {
+                          "path": "/panels/status",
+                          "method": "GET",
+                          "description": "Get status of all panels"
+                      },
+                      {
+                          "path": "/documentation",
+                          "method": "GET",
+                          "description": "Get API documentation"
+                      }
+                  ]
+              }
+              return jsonify(docs)
+
+          @app.route('/', methods=['GET'])
+          def root():
+              """Root endpoint - redirects to API documentation."""
+              return jsonify({
+                  "name": "Solar Panel Defect Detection API",
+                  "version": "1.0",
+                  "documentation": "/api/documentation"
+              })
+
+          # If Swagger UI is enabled, set it up
+          if ENABLE_SWAGGER:
+              try:
+                  from flask_swagger_ui import get_swaggerui_blueprint
+                  
+                  SWAGGER_URL = '/swagger'
+                  API_URL = '/api/documentation'
+                  
+                  swaggerui_blueprint = get_swaggerui_blueprint(
+                      SWAGGER_URL,
+                      API_URL,
+                      config={
+                          'app_name': "Solar Panel Defect Detection API"
+                      }
+                  )
+                  app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
+                  logger.info("Swagger UI enabled at /swagger")
+              except ImportError:
+                  logger.warning("flask_swagger_ui not installed, Swagger UI disabled")
+                  ENABLE_SWAGGER = False
+
+          def main():
+              """Main function to start the API server."""
+              logger.info("Starting API Server")
+              
+              # Initialize Redis connection
+              init_redis()
+              
+              # Start the API server
+              logger.info(f"Starting API server on port {API_PORT}")
+              app.run(host='0.0.0.0', port=API_PORT)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          python /app/server.py
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: AI_PROCESSOR_URL
+          value: "http://ai-processor-service:8081"
+        - name: DATA_COLLECTOR_URL
+          value: "http://data-collector-service:8080"
+        - name: ENABLE_SWAGGER
+          value: "true"
+        - name: API_PORT
+          value: "8000"
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "300m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-processor
+  namespace: solar-panel-detection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-processor
+  template:
+    metadata:
+      labels:
+        app: ai-processor
+    spec:
+      containers:
+      - name: ai-processor
+        image: tensorflow/tensorflow:2.8.0
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install flask requests redis pymongo numpy pandas scikit-learn joblib kafka-python && 
+          mkdir -p /app && 
+          cat > /app/processor.py << 'EOF'
+          import os
+          import json
+          import time
+          import logging
+          import threading
+          import numpy as np
+          import pandas as pd
+          from datetime import datetime, timedelta
+          import base64
+          from sklearn.ensemble import IsolationForest
+          from flask import Flask, request, jsonify
+          import requests
+          import joblib
+          import redis
+          from kafka import KafkaConsumer
+          import tensorflow as tf
+          from tensorflow.keras.models import load_model
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('ai-processor')
+
+          # Configuration from environment variables
+          REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
+          REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+          DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080')
+          KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092')
+          KAFKA_TOPIC = os.environ.get('KAFKA_TOPIC', 'sensor-data')
+          USE_KAFKA = os.environ.get('USE_KAFKA', 'false').lower() == 'true'
+          MODEL_DIR = os.environ.get('MODEL_DIR', '/models')
+          API_PORT = int(os.environ.get('API_PORT', '8081'))
+          PROCESSING_INTERVAL = int(os.environ.get('PROCESSING_INTERVAL', '300'))  # 5 minutes
+
+          # Flask application
+          app = Flask(__name__)
+
+          # Global variables
+          redis_client = None
+          anomaly_detector = None
+          thermal_model = None
+          panel_status_cache = {}
+
+          # Initialize connections and models
+          def init():
+              global redis_client, anomaly_detector, thermal_model
+              
+              # Connect to Redis
+              try:
+                  redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+                  redis_client.ping()  # Test the connection
+                  logger.info(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+              except Exception as e:
+                  logger.error(f"Failed to connect to Redis: {e}")
+                  redis_client = None
+              
+              # Load or create anomaly detection model
+              try:
+                  model_path = os.path.join(MODEL_DIR, 'anomaly_detector.joblib')
+                  if os.path.exists(model_path):
+                      anomaly_detector = joblib.load(model_path)
+                      logger.info("Loaded anomaly detection model")
+                  else:
+                      logger.info("Creating new anomaly detection model")
+                      anomaly_detector = IsolationForest(
+                          n_estimators=100,
+                          contamination=0.05,
+                          random_state=42
+                      )
+              except Exception as e:
+                  logger.error(f"Error with anomaly detection model: {e}")
+                  anomaly_detector = None
+              
+              # Load thermal imaging model if it exists
+              try:
+                  thermal_model_path = os.path.join(MODEL_DIR, 'thermal_model.h5')
+                  if os.path.exists(thermal_model_path):
+                      thermal_model = load_model(thermal_model_path)
+                      logger.info("Loaded thermal imaging model")
+                  else:
+                      logger.warning("Thermal imaging model not found, will use rule-based analysis")
+              except Exception as e:
+                  logger.error(f"Error loading thermal imaging model: {e}")
+                  thermal_model = None
+
+          # Rule-based defect detection functions
+          def analyze_temperature_data(data, location_code, panel_id):
+              """Analyze temperature data for anomalies."""
+              if not data or 'value' not in data:
+                  return None
+              
+              temperature = data['value']
+              is_defect = False
+              defect_type = None
+              severity = "low"
+              
+              # Basic rules based on absolute temperature values
+              if temperature > 85:
+                  is_defect = True
+                  defect_type = "overheating"
+                  severity = "high"
+              elif temperature > 75:
+                  is_defect = True
+                  defect_type = "high_temperature"
+                  severity = "medium"
+              
+              # Check temperature relative to ambient if available
+              if 'metadata' in data and 'ambient_temperature' in data['metadata']:
+                  ambient = data['metadata']['ambient_temperature']
+                  temp_diff = temperature - ambient
+                  
+                  if temp_diff > 35:
+                      is_defect = True
+                      defect_type = "hotspot"
+                      severity = "high"
+                  elif temp_diff > 25:
+                      is_defect = True
+                      defect_type = "thermal_anomaly"
+                      severity = "medium"
+              
+              if is_defect:
+                  return {
+                      "location_code": location_code,
+                      "panel_id": panel_id,
+                      "identified_defect": defect_type,
+                      "severity": severity,
+                      "temperature": temperature,
+                      "confidence": 0.75 if severity == "high" else 0.6,
+                      "possible_solution": get_solution_for_defect(defect_type, severity)
+                  }
+              
+              return None
+
+          def analyze_irradiance_data(data, temp_data, location_code, panel_id):
+              """Analyze irradiance data alongside temperature."""
+              if not data or 'value' not in data:
+                  return None
+              
+              irradiance = data['value']
+              is_defect = False
+              defect_type = None
+              severity = "low"
+              
+              # Check for low irradiance vs high temperature
+              if temp_data and 'value' in temp_data:
+                  temperature = temp_data['value']
+                  # If high temperature but low irradiance, something might be wrong
+                  if temperature > 65 and irradiance < 400:
+                      is_defect = True
+                      defect_type = "temp_irradiance_mismatch"
+                      severity = "medium"
+              
+              # Check for dust accumulation - sustained low irradiance when clear sky
+              if (irradiance < 300 and 'metadata' in data and 
+                      data['metadata'].get('sky_condition') == 'clear'):
+                  is_defect = True
+                  defect_type = "potential_dust_accumulation"
+                  severity = "medium"
+              
+              # Check for fault detected by the sensor itself
+              if 'metadata' in data and data['metadata'].get('fault_detected'):
+                  is_defect = True
+                  defect_type = data['metadata'].get('fault_type', 'unknown_fault')
+                  severity = "medium"
+              
+              if is_defect:
+                  return {
+                      "location_code": location_code,
+                      "panel_id": panel_id,
+                      "identified_defect": defect_type,
+                      "severity": severity,
+                      "irradiance": irradiance,
+                      "confidence": 0.7,
+                      "possible_solution": get_solution_for_defect(defect_type, severity)
+                  }
+              
+              return None
+
+          def analyze_humidity_data(data, location_code, panel_id):
+              """Analyze humidity data for moisture-related defects."""
+              if not data or 'value' not in data:
+                  return None
+              
+              humidity = data['value']
+              is_defect = False
+              defect_type = None
+              severity = "low"
+              
+              # Very high sustained humidity can lead to moisture ingress
+              if humidity > 90:
+                  is_defect = True
+                  defect_type = "high_humidity_exposure"
+                  severity = "medium"
+              
+              # Check for fault detected by the sensor itself
+              if 'metadata' in data and data['metadata'].get('fault_detected'):
+                  is_defect = True
+                  defect_type = data['metadata'].get('fault_type', 'unknown_fault')
+                  severity = "medium"
+              
+              if is_defect:
+                  return {
+                      "location_code": location_code,
+                      "panel_id": panel_id,
+                      "identified_defect": defect_type,
+                      "severity": severity,
+                      "humidity": humidity,
+                      "confidence": 0.65,
+                      "possible_solution": get_solution_for_defect(defect_type, severity)
+                  }
+              
+              return None
+
+          def analyze_wind_data(data, location_code, panel_id):
+              """Analyze wind data for potential mechanical issues."""
+              if not data or 'value' not in data:
+                  return None
+              
+              wind_speed = data['value']
+              is_defect = False
+              defect_type = None
+              severity = "low"
+              
+              # High wind speed can indicate mounting/structural issues
+              if wind_speed > 15 and 'metadata' in data and data['metadata'].get('wind_stress') == 'high':
+                  is_defect = True
+                  defect_type = "high_wind_stress"
+                  severity = "medium"
+              
+              # Check for fault detected by the sensor itself
+              if 'metadata' in data and data['metadata'].get('fault_detected'):
+                  is_defect = True
+                  defect_type = data['metadata'].get('fault_type', 'unknown_fault')
+                  severity = "high" if defect_type == "mounting_issue" else "medium"
+              
+              if is_defect:
+                  return {
+                      "location_code": location_code,
+                      "panel_id": panel_id,
+                      "identified_defect": defect_type,
+                      "severity": severity,
+                      "wind_speed": wind_speed,
+                      "confidence": 0.75 if severity == "high" else 0.6,
+                      "possible_solution": get_solution_for_defect(defect_type, severity)
+                  }
+              
+              return None
+          EOF
+          python /app/processor.py
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: DATA_COLLECTOR_URL
+          value: "http://data-collector-service:8080"
+        - name: MODEL_DIR
+          value: "/models"
+        - name: PROCESSING_INTERVAL
+          value: "300"
+        - name: USE_KAFKA
+          value: "false"
+        ports:
+        - containerPort: 8081
+        - containerPort: 9102
+          name: metrics
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: ml-model-storage

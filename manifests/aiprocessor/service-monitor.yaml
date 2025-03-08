@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: solar-panel-monitor
+  namespace: solar-panel-detection
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: ai-processor
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
+  namespaceSelector:
+    matchNames:
+    - solar-panel-detection

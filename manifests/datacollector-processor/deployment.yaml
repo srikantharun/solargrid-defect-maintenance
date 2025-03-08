@@ -1,0 +1,439 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-collector
+  namespace: solar-panel-detection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-collector
+  template:
+    metadata:
+      labels:
+        app: data-collector
+    spec:
+      containers:
+      - name: data-collector
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install flask requests redis pymongo numpy kafka-python && 
+          mkdir -p /app && 
+          cat > /app/collector.py << 'EOF'
+          import os
+          import json
+          import time
+          import logging
+          import threading
+          from datetime import datetime, timedelta
+          from flask import Flask, request, jsonify
+          import redis
+          import pymongo
+          from pymongo import MongoClient
+          import numpy as np
+          from kafka import KafkaProducer
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('data-collector')
+
+          # Configuration from environment variables
+          REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
+          REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+          MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://mongodb:27017/')
+          MONGO_DB = os.environ.get('MONGO_DB', 'solar_panel_data')
+          KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092')
+          USE_KAFKA = os.environ.get('USE_KAFKA', 'false').lower() == 'true'
+          KAFKA_TOPIC = os.environ.get('KAFKA_TOPIC', 'sensor-data')
+          DATA_RETENTION_DAYS = int(os.environ.get('DATA_RETENTION_DAYS', '30'))
+          API_PORT = int(os.environ.get('API_PORT', '8080'))
+
+          # Flask application
+          app = Flask(__name__)
+
+          # Global connections
+          redis_client = None
+          mongo_client = None
+          mongodb = None
+          kafka_producer = None
+
+          # Initialize database connections
+          def init_connections():
+              global redis_client, mongo_client, mongodb, kafka_producer
+              
+              # Set up Redis connection
+              try:
+                  redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+                  redis_client.ping()  # Test the connection
+                  logger.info(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+              except Exception as e:
+                  logger.error(f"Failed to connect to Redis: {e}")
+                  redis_client = None
+              
+              # Set up MongoDB connection
+              try:
+                  mongo_client = MongoClient(MONGO_URI)
+                  mongodb = mongo_client[MONGO_DB]
+                  # Create indexes
+                  mongodb.sensor_data.create_index([("timestamp", pymongo.DESCENDING)])
+                  mongodb.sensor_data.create_index([("sensor_type", pymongo.ASCENDING)])
+                  mongodb.sensor_data.create_index([("location_code", pymongo.ASCENDING)])
+                  mongodb.sensor_data.create_index([("panel_id", pymongo.ASCENDING)])
+                  logger.info(f"Connected to MongoDB at {MONGO_URI}")
+              except Exception as e:
+                  logger.error(f"Failed to connect to MongoDB: {e}")
+                  mongo_client = None
+                  mongodb = None
+              
+              # Set up Kafka producer if enabled
+              if USE_KAFKA:
+                  try:
+                      kafka_producer = KafkaProducer(
+                          bootstrap_servers=KAFKA_BROKER,
+                          value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                      )
+                      logger.info(f"Connected to Kafka at {KAFKA_BROKER}")
+                  except Exception as e:
+                      logger.error(f"Failed to connect to Kafka: {e}")
+                      kafka_producer = None
+
+          # Process incoming sensor data
+          def process_sensor_data(data):
+              """Process and store incoming sensor data."""
+              # Ensure timestamp is in the data
+              if "timestamp" not in data:
+                  data["timestamp"] = datetime.now().isoformat()
+              
+              # Store in MongoDB for long-term storage
+              if mongodb:
+                  try:
+                      mongodb.sensor_data.insert_one(data)
+                  except Exception as e:
+                      logger.error(f"Failed to store data in MongoDB: {e}")
+              
+              # Store latest values in Redis for fast access
+              if redis_client:
+                  try:
+                      # Create a key based on sensor type and ID
+                      key_base = f"{data.get('sensor_type', 'unknown')}:{data.get('sensor_id', 'unknown')}"
+                      
+                      # Store the full data JSON
+                      redis_client.set(
+                          f"{key_base}:latest", 
+                          json.dumps(data),
+                          ex=86400  # Expire after 24 hours
+                      )
+                      
+                      # Store the value separately if it exists
+                      if "value" in data:
+                          redis_client.set(
+                              f"{key_base}:value", 
+                              data["value"],
+                              ex=86400  # Expire after 24 hours
+                          )
+                      
+                      # If it's a thermal image, store defect info
+                      if data.get("sensor_type") == "thermal_imaging" and data.get("defect_detected"):
+                          redis_client.set(
+                              f"{key_base}:defect",
+                              json.dumps(data.get("defect_info", {})),
+                              ex=86400
+                          )
+                          
+                          # Add to a defect list for quick retrieval of all defects
+                          redis_client.lpush("defects:recent", json.dumps({
+                              "timestamp": data.get("timestamp"),
+                              "location_code": data.get("location_code"),
+                              "panel_id": data.get("panel_id"),
+                              "defect_info": data.get("defect_info")
+                          }))
+                          redis_client.ltrim("defects:recent", 0, 99)  # Keep only the 100 most recent
+                  except Exception as e:
+                      logger.error(f"Failed to store data in Redis: {e}")
+              
+              # Publish to Kafka for stream processing if enabled
+              if kafka_producer and USE_KAFKA:
+                  try:
+                      kafka_producer.send(KAFKA_TOPIC, data)
+                  except Exception as e:
+                      logger.error(f"Failed to publish to Kafka: {e}")
+
+          # API routes
+          @app.route('/sensor-data', methods=['POST'])
+          def receive_sensor_data():
+              """Receive sensor data from pods and process it."""
+              if not request.json:
+                  return jsonify({"error": "No data provided"}), 400
+              
+              data = request.json
+              logger.debug(f"Received data: {data.get('sensor_type')} from {data.get('sensor_id')}")
+              
+              # Process the data in a separate thread to not block the API
+              threading.Thread(target=process_sensor_data, args=(data,)).start()
+              
+              return jsonify({"status": "received"}), 200
+
+          @app.route('/latest/<sensor_type>', methods=['GET'])
+          def get_latest_by_type(sensor_type):
+              """Get latest data for a specific sensor type."""
+              if not redis_client:
+                  return jsonify({"error": "Redis not available"}), 503
+              
+              try:
+                  # Get all keys matching this sensor type
+                  keys = redis_client.keys(f"{sensor_type}:*:latest")
+                  
+                  results = []
+                  for key in keys:
+                      data = redis_client.get(key)
+                      if data:
+                          results.append(json.loads(data))
+                  
+                  return jsonify(results), 200
+              except Exception as e:
+                  logger.error(f"Error retrieving latest data: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/latest/location/<location_code>', methods=['GET'])
+          def get_latest_by_location(location_code):
+              """Get latest data for a specific location."""
+              if not mongodb:
+                  return jsonify({"error": "MongoDB not available"}), 503
+              
+              try:
+                  # Find the latest entry for each sensor type at this location
+                  pipeline = [
+                      {"$match": {"location_code": location_code}},
+                      {"$sort": {"timestamp": -1}},
+                      {"$group": {
+                          "_id": "$sensor_type",
+                          "latest": {"$first": "$$ROOT"}
+                      }},
+                      {"$replaceRoot": {"newRoot": "$latest"}}
+                  ]
+                  
+                  results = list(mongodb.sensor_data.aggregate(pipeline))
+                  
+                  # Remove MongoDB _id field
+                  for result in results:
+                      if "_id" in result:
+                          del result["_id"]
+                  
+                  return jsonify(results), 200
+              except Exception as e:
+                  logger.error(f"Error retrieving location data: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/panel/<panel_id>', methods=['GET'])
+          def get_panel_data(panel_id):
+              """Get data for a specific panel."""
+              if not mongodb:
+                  return jsonify({"error": "MongoDB not available"}), 503
+              
+              try:
+                  # Find the latest entry for each sensor type for this panel
+                  pipeline = [
+                      {"$match": {"panel_id": panel_id}},
+                      {"$sort": {"timestamp": -1}},
+                      {"$group": {
+                          "_id": "$sensor_type",
+                          "latest": {"$first": "$$ROOT"}
+                      }},
+                      {"$replaceRoot": {"newRoot": "$latest"}}
+                  ]
+                  
+                  results = list(mongodb.sensor_data.aggregate(pipeline))
+                  
+                  # Remove MongoDB _id field
+                  for result in results:
+                      if "_id" in result:
+                          del result["_id"]
+                  
+                  return jsonify(results), 200
+              except Exception as e:
+                  logger.error(f"Error retrieving panel data: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/defects/recent', methods=['GET'])
+          def get_recent_defects():
+              """Get recent defects from all panels."""
+              if not redis_client:
+                  return jsonify({"error": "Redis not available"}), 503
+              
+              try:
+                  defects = redis_client.lrange("defects:recent", 0, -1)
+                  result = [json.loads(d) for d in defects]
+                  return jsonify(result), 200
+              except Exception as e:
+                  logger.error(f"Error retrieving recent defects: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          @app.route('/history/<sensor_type>/<sensor_id>', methods=['GET'])
+          def get_sensor_history(sensor_type, sensor_id):
+              """Get historical data for a specific sensor."""
+              if not mongodb:
+                  return jsonify({"error": "MongoDB not available"}), 503
+              
+              try:
+                  # Optional query parameters
+                  hours = request.args.get('hours', default=24, type=int)
+                  limit = request.args.get('limit', default=100, type=int)
+                  
+                  # Calculate time window
+                  end_time = datetime.now()
+                  start_time = end_time - timedelta(hours=hours)
+                  
+                  # Query MongoDB
+                  results = list(mongodb.sensor_data.find(
+                      {
+                          "sensor_type": sensor_type,
+                          "sensor_id": sensor_id,
+                          "timestamp": {"$gte": start_time.isoformat(), "$lte": end_time.isoformat()}
+                      },
+                      {"_id": 0}  # Exclude MongoDB _id field
+                  ).sort("timestamp", -1).limit(limit))
+                  
+                  return jsonify(results), 200
+              except Exception as e:
+                  logger.error(f"Error retrieving sensor history: {e}")
+                  return jsonify({"error": str(e)}), 500
+
+          def cleanup_old_data():
+              """Periodically clean up old data from MongoDB."""
+              while True:
+                  try:
+                      if mongodb:
+                          # Calculate cutoff date
+                          cutoff_date = (datetime.now() - timedelta(days=DATA_RETENTION_DAYS)).isoformat()
+                          
+                          # Delete old data
+                          result = mongodb.sensor_data.delete_many({"timestamp": {"$lt": cutoff_date}})
+                          logger.info(f"Deleted {result.deleted_count} old records")
+                  except Exception as e:
+                      logger.error(f"Error during data cleanup: {e}")
+                  
+                  # Run once a day
+                  time.sleep(86400)
+
+          def main():
+              """Main function to start the data collector service."""
+              logger.info("Starting Data Collector Service")
+              
+              # Initialize connections
+              init_connections()
+              
+              # Start cleanup thread
+              threading.Thread(target=cleanup_old_data, daemon=True).start()
+              
+              # Start the API server
+              logger.info(f"Starting API server on port {API_PORT}")
+              app.run(host='0.0.0.0', port=API_PORT)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          python /app/collector.py
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: MONGO_URI
+          value: "mongodb://mongodb:27017/"
+        - name: MONGO_DB
+          value: "solar_panel_data"
+        - name: USE_KAFKA
+          value: "false"
+        - name: DATA_RETENTION_DAYS
+          value: "30"
+        - name: API_PORT
+          value: "8080"
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: solar-panel-detection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:6.2
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: solar-panel-detection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+      - name: mongodb
+        image: mongo:4.4
+        ports:
+        - containerPort: 27017
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: mongodb-data
+          mountPath: /data/db
+      volumes:
+      - name: mongodb-data
+        persistentVolumeClaim:
+          claimName: mongodb-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongodb-data
+  namespace: solar-panel-detection
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

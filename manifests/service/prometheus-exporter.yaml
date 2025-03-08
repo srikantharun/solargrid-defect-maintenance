@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-exporter
+  namespace: solar-panel-detection
+  labels:
+    app: prometheus-exporter
+    k8s-app: solar-panel-metrics
+spec:
+  selector:
+    app: ai-processor
+  ports:
+  - name: metrics
+    port: 9102
+    targetPort: 9102
+  type: ClusterIP

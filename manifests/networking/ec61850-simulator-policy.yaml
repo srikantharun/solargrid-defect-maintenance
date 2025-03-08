@@ -1,0 +1,47 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sensor-policy
+  namespace: solar-panel-detection
+spec:
+  podSelector:
+    matchLabels:
+      app: sensor
+  ingress: []
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: data-collector
+    ports:
+    - protocol: TCP
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: microcontroller-policy
+  namespace: solar-panel-detection
+spec:
+  podSelector:
+    matchLabels:
+      app: microcontroller-simulator
+  ingress:
+  - ports:
+    - protocol: TCP
+      port: 8090
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: mqtt-broker
+    ports:
+    - protocol: TCP
+      port: 1883
+  - to:
+    - podSelector:
+        matchLabels:
+          app: data-collector
+    ports:
+    - protocol: TCP
+      port: 8080

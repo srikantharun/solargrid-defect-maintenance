@@ -1,0 +1,305 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microcontroller-simulator
+  namespace: solar-panel-detection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: microcontroller-simulator
+  template:
+    metadata:
+      labels:
+        app: microcontroller-simulator
+    spec:
+      containers:
+      - name: microcontroller-interface
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install flask requests redis paho-mqtt pyserial && 
+          mkdir -p /app && 
+          cat > /app/interface.py << 'EOF'
+          import time
+          import json
+          import serial
+          import requests
+          import os
+          import logging
+          import threading
+          from datetime import datetime
+          import paho.mqtt.client as mqtt
+          from flask import Flask, request, jsonify
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('microcontroller-interface')
+
+          # Configuration from environment variables
+          SERIAL_PORT = os.environ.get('SERIAL_PORT', '/dev/ttyUSB0')
+          SERIAL_BAUDRATE = int(os.environ.get('SERIAL_BAUDRATE', '9600'))
+          MQTT_BROKER = os.environ.get('MQTT_BROKER', 'mqtt-broker')
+          MQTT_PORT = int(os.environ.get('MQTT_PORT', '1883'))
+          MQTT_TOPIC_SUB = os.environ.get('MQTT_TOPIC_SUB', 'microcontroller/data')
+          MQTT_TOPIC_PUB = os.environ.get('MQTT_TOPIC_PUB', 'commands/microcontroller')
+          DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080/sensor-data')
+          API_PORT = int(os.environ.get('API_PORT', '8090'))
+          USE_SERIAL = os.environ.get('USE_SERIAL', 'false').lower() == 'true'
+          USE_MQTT = os.environ.get('USE_MQTT', 'true').lower() == 'true'
+
+          # Global variables
+          serial_connection = None
+          mqtt_client = None
+          known_microcontrollers = {}
+
+          # Flask application
+          app = Flask(__name__)
+
+          def setup_serial():
+              """Set up the serial connection to the microcontroller."""
+              global serial_connection
+              
+              if not USE_SERIAL:
+                  logger.info("Serial communication disabled by configuration")
+                  return
+              
+              try:
+                  serial_connection = serial.Serial(SERIAL_PORT, SERIAL_BAUDRATE, timeout=1)
+                  logger.info(f"Successfully connected to serial port {SERIAL_PORT} at {SERIAL_BAUDRATE} baud")
+              except Exception as e:
+                  logger.error(f"Failed to connect to serial port: {e}")
+                  serial_connection = None
+
+          def mqtt_on_connect(client, userdata, flags, rc):
+              """Handle MQTT connection."""
+              if rc == 0:
+                  logger.info("Connected to MQTT broker")
+                  client.subscribe(MQTT_TOPIC_SUB)
+                  logger.info(f"Subscribed to topic: {MQTT_TOPIC_SUB}")
+              else:
+                  logger.error(f"Failed to connect to MQTT broker with code: {rc}")
+
+          def mqtt_on_message(client, userdata, msg):
+              """Handle incoming MQTT messages."""
+              try:
+                  payload = msg.payload.decode('utf-8')
+                  logger.debug(f"Received MQTT message: {payload}")
+                  
+                  data = json.loads(payload)
+                  process_microcontroller_data(data)
+              except Exception as e:
+                  logger.error(f"Error processing MQTT message: {e}")
+
+          def setup_mqtt():
+              """Set up the MQTT client."""
+              global mqtt_client
+              
+              if not USE_MQTT:
+                  logger.info("MQTT communication disabled by configuration")
+                  return
+              
+              try:
+                  mqtt_client = mqtt.Client()
+                  mqtt_client.on_connect = mqtt_on_connect
+                  mqtt_client.on_message = mqtt_on_message
+                  mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+                  mqtt_client.loop_start()
+                  logger.info(f"Started MQTT client, connecting to {MQTT_BROKER}:{MQTT_PORT}")
+              except Exception as e:
+                  logger.error(f"Failed to connect to MQTT broker: {e}")
+                  mqtt_client = None
+
+          def read_from_serial():
+              """Read data from the serial port."""
+              if not serial_connection:
+                  return
+              
+              try:
+                  if serial_connection.in_waiting > 0:
+                      line = serial_connection.readline().decode('utf-8').strip()
+                      if line:
+                          logger.debug(f"Received serial data: {line}")
+                          try:
+                              data = json.loads(line)
+                              process_microcontroller_data(data)
+                          except json.JSONDecodeError:
+                              logger.warning(f"Received non-JSON data from serial: {line}")
+                          except Exception as e:
+                              logger.error(f"Error processing serial data: {e}")
+              except Exception as e:
+                  logger.error(f"Error reading from serial port: {e}")
+
+          def process_microcontroller_data(data):
+              """Process data received from a microcontroller."""
+              # Extract microcontroller ID and update last seen timestamp
+              if "microcontroller_id" in data:
+                  mc_id = data["microcontroller_id"]
+                  known_microcontrollers[mc_id] = {
+                      "last_seen": datetime.now().isoformat(),
+                      "type": data.get("type", "unknown"),
+                      "location": data.get("location_code", "unknown")
+                  }
+              
+              # Forward the data to the data collector
+              send_to_data_collector(data)
+
+          def send_to_data_collector(data):
+              """Send data to the data collector service."""
+              try:
+                  response = requests.post(DATA_COLLECTOR_URL, json=data)
+                  if response.status_code == 200:
+                      logger.info(f"Successfully forwarded data from microcontroller to collector")
+                      return True
+                  else:
+                      logger.error(f"Failed to send data to collector: HTTP {response.status_code}")
+                      return False
+              except Exception as e:
+                  logger.error(f"Error sending data to collector: {e}")
+                  return False
+
+          def send_command_to_microcontroller(mc_id, command):
+              """Send a command to a specific microcontroller."""
+              command_data = {
+                  "target_id": mc_id,
+                  "command": command,
+                  "timestamp": datetime.now().isoformat()
+              }
+              
+              # Try to send via MQTT
+              if mqtt_client:
+                  try:
+                      mqtt_client.publish(MQTT_TOPIC_PUB, json.dumps(command_data))
+                      logger.info(f"Sent command to {mc_id} via MQTT")
+                      return True
+                  except Exception as e:
+                      logger.error(f"Failed to send command via MQTT: {e}")
+              
+              # Try to send via Serial
+              if serial_connection:
+                  try:
+                      serial_connection.write(f"{json.dumps(command_data)}\n".encode('utf-8'))
+                      logger.info(f"Sent command to {mc_id} via Serial")
+                      return True
+                  except Exception as e:
+                      logger.error(f"Failed to send command via Serial: {e}")
+              
+              return False
+
+          # API routes
+          @app.route('/microcontrollers', methods=['GET'])
+          def get_microcontrollers():
+              """Get a list of all known microcontrollers."""
+              return jsonify(known_microcontrollers)
+
+          @app.route('/microcontrollers/<mc_id>/command', methods=['POST'])
+          def send_command(mc_id):
+              """Send a command to a specific microcontroller."""
+              if not request.json or 'command' not in request.json:
+                  return jsonify({"error": "Command is required"}), 400
+              
+              command = request.json['command']
+              success = send_command_to_microcontroller(mc_id, command)
+              
+              if success:
+                  return jsonify({"status": "command sent"}), 200
+              else:
+                  return jsonify({"error": "Failed to send command"}), 500
+
+          @app.route('/register', methods=['POST'])
+          def register_microcontroller():
+              """Manually register a microcontroller."""
+              if not request.json or 'microcontroller_id' not in request.json:
+                  return jsonify({"error": "Microcontroller ID is required"}), 400
+              
+              mc_id = request.json['microcontroller_id']
+              known_microcontrollers[mc_id] = {
+                  "last_seen": datetime.now().isoformat(),
+                  "type": request.json.get("type", "unknown"),
+                  "location": request.json.get("location_code", "unknown"),
+                  "manually_registered": True
+              }
+              
+              return jsonify({"status": "registered", "microcontroller_id": mc_id}), 201
+
+          def serial_polling_thread():
+              """Thread function to continuously poll the serial port."""
+              while True:
+                  try:
+                      read_from_serial()
+                      time.sleep(0.1)  # Small delay to avoid CPU hogging
+                  except Exception as e:
+                      logger.error(f"Error in serial polling thread: {e}")
+                      time.sleep(1)  # Longer delay if there was an error
+
+          def main():
+              """Main function to start the microcontroller interface."""
+              logger.info("Starting Microcontroller Interface")
+              
+              # Set up communication channels
+              setup_serial()
+              setup_mqtt()
+              
+              # Start serial polling in a separate thread
+              if USE_SERIAL and serial_connection:
+                  threading.Thread(target=serial_polling_thread, daemon=True).start()
+              
+              # Start the API server
+              logger.info(f"Starting API server on port {API_PORT}")
+              app.run(host='0.0.0.0', port=API_PORT)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          python /app/interface.py
+        env:
+        - name: USE_SERIAL
+          value: "false"  # Disable serial for K8s demo
+        - name: USE_MQTT
+          value: "true"
+        - name: MQTT_BROKER
+          value: "mqtt-broker"
+        - name: DATA_COLLECTOR_URL
+          value: "http://data-collector-service:8080/sensor-data"
+        ports:
+        - containerPort: 8090
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-broker
+  namespace: solar-panel-detection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mqtt-broker
+  template:
+    metadata:
+      labels:
+        app: mqtt-broker
+    spec:
+      containers:
+      - name: mqtt-broker
+        image: eclipse-mosquitto:2.0
+        ports:
+        - containerPort: 1883
+        - containerPort: 9001
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"

@@ -1,0 +1,489 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: irradiance-sensor
+  namespace: solar-panel-detection
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sensor
+      type: irradiance
+  template:
+    metadata:
+      labels:
+        app: sensor
+        type: irradiance
+    spec:
+      containers:
+      - name: irradiance-sensor
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install requests && 
+          mkdir -p /app && 
+          cat > /app/sensor.py << 'EOF'
+          import time
+          import random
+          import requests
+          import os
+          import json
+          import uuid
+          import logging
+          from datetime import datetime
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('irradiance-sensor')
+
+          # Configuration
+          SENSOR_ID = os.environ.get('SENSOR_ID', str(uuid.uuid4())[:8])
+          LOCATION_CODE = os.environ.get('LOCATION_CODE', 'A1')
+          DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080/sensor-data')
+          SEND_INTERVAL_SECONDS = int(os.environ.get('SEND_INTERVAL_SECONDS', '5'))
+
+          def generate_irradiance_data():
+              """
+              Generate simulated irradiance sensor data.
+              Irradiance is measured in W/m² and typically ranges from 0 to 1200 W/m² on a sunny day.
+              """
+              # Simulate time-of-day effects on irradiance
+              current_hour = datetime.now().hour
+              
+              # Base values by time of day (simulated daylight cycle)
+              if 6 <= current_hour < 10:  # Morning
+                  base_irradiance = 300 + (current_hour - 6) * 150
+              elif 10 <= current_hour < 16:  # Midday
+                  base_irradiance = 900 + random.randint(-100, 100)
+              elif 16 <= current_hour < 20:  # Evening
+                  base_irradiance = 900 - ((current_hour - 16) * 200)
+              else:  # Night
+                  base_irradiance = random.randint(0, 10)  # Very low at night
+              
+              # Add some random fluctuation
+              irradiance = max(0, base_irradiance + random.randint(-50, 50))
+              
+              # Occasionally simulate cloud cover
+              if random.random() < 0.2:  # 20% chance of clouds
+                  irradiance *= random.uniform(0.3, 0.7)  # Reduce irradiance by 30-70%
+              
+              # Simulate panel faults that affect irradiance readings
+              has_fault = random.random() < 0.05  # 5% chance of a fault
+              fault_type = None
+              
+              if has_fault:
+                  fault_types = ["dust_coverage", "partial_shading", "degradation"]
+                  fault_type = random.choice(fault_types)
+                  
+                  if fault_type == "dust_coverage":
+                      irradiance *= random.uniform(0.7, 0.9)  # Dust reduces irradiance by 10-30%
+                  elif fault_type == "partial_shading":
+                      irradiance *= random.uniform(0.5, 0.8)  # Shading reduces irradiance by 20-50%
+                  elif fault_type == "degradation":
+                      irradiance *= random.uniform(0.8, 0.95)  # Degradation reduces irradiance by 5-20%
+              
+              return {
+                  "sensor_id": SENSOR_ID,
+                  "sensor_type": "irradiance",
+                  "location_code": LOCATION_CODE,
+                  "timestamp": datetime.now().isoformat(),
+                  "value": round(irradiance, 2),
+                  "unit": "W/m²",
+                  "metadata": {
+                      "fault_detected": has_fault,
+                      "fault_type": fault_type,
+                      "sky_condition": "cloudy" if irradiance < 400 and 6 <= current_hour < 20 else "clear",
+                  }
+              }
+
+          def send_sensor_data(data):
+              """Send sensor data to the collector service."""
+              try:
+                  response = requests.post(DATA_COLLECTOR_URL, json=data)
+                  if response.status_code == 200:
+                      logger.info(f"Successfully sent data: {data['value']} {data['unit']}")
+                      return True
+                  else:
+                      logger.error(f"Failed to send data: HTTP {response.status_code}")
+                      return False
+              except requests.RequestException as e:
+                  logger.error(f"Error sending data: {e}")
+                  return False
+
+          def main():
+              """Main function to generate and send sensor data."""
+              logger.info(f"Starting irradiance sensor {SENSOR_ID} at location {LOCATION_CODE}")
+              logger.info(f"Sending data to {DATA_COLLECTOR_URL} every {SEND_INTERVAL_SECONDS} seconds")
+              
+              while True:
+                  try:
+                      data = generate_irradiance_data()
+                      send_sensor_data(data)
+                  except Exception as e:
+                      logger.error(f"Unexpected error: {e}")
+                  
+                  time.sleep(SEND_INTERVAL_SECONDS)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          python /app/sensor.py
+        env:
+        - name: SENSOR_TYPE
+          value: "irradiance"
+        - name: LOCATION_CODE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: DATA_COLLECTOR_URL
+          value: "http://data-collector-service:8080/sensor-data"
+        - name: SEND_INTERVAL_SECONDS
+          value: "5"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temperature-sensor
+  namespace: solar-panel-detection
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sensor
+      type: temperature
+  template:
+    metadata:
+      labels:
+        app: sensor
+        type: temperature
+    spec:
+      containers:
+      - name: temperature-sensor
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install requests && 
+          mkdir -p /app && 
+          cat > /app/sensor.py << 'EOF'
+          import time
+          import random
+          import requests
+          import os
+          import json
+          import uuid
+          import logging
+          from datetime import datetime
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('temperature-sensor')
+
+          # Configuration
+          SENSOR_ID = os.environ.get('SENSOR_ID', str(uuid.uuid4())[:8])
+          LOCATION_CODE = os.environ.get('LOCATION_CODE', 'A1')
+          DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080/sensor-data')
+          SEND_INTERVAL_SECONDS = int(os.environ.get('SEND_INTERVAL_SECONDS', '5'))
+
+          def generate_temperature_data():
+              """
+              Generate simulated temperature sensor data.
+              Temperature is typically measured in °C and solar panels can get quite hot.
+              """
+              # Simulate time-of-day effects on temperature
+              current_hour = datetime.now().hour
+              
+              # Base ambient temperature by time of day
+              if 0 <= current_hour < 6:  # Early morning
+                  base_ambient_temp = 15 + random.uniform(-3, 3)
+              elif 6 <= current_hour < 12:  # Morning to noon
+                  base_ambient_temp = 20 + random.uniform(-2, 5)
+              elif 12 <= current_hour < 18:  # Afternoon
+                  base_ambient_temp = 25 + random.uniform(-2, 8)
+              else:  # Evening/night
+                  base_ambient_temp = 18 + random.uniform(-5, 3)
+              
+              # Solar panel temperature is higher than ambient due to sun exposure
+              # During the day, panels can be 20-30°C above ambient temperature
+              if 8 <= current_hour < 19:  # Daylight hours
+                  panel_temp_increase = random.uniform(15, 30)
+              else:  # Night
+                  panel_temp_increase = random.uniform(-2, 2)  # At night, close to ambient
+              
+              panel_temperature = base_ambient_temp + panel_temp_increase
+              
+              # Simulate panel faults that affect temperature
+              has_fault = random.random() < 0.05  # 5% chance of a fault
+              fault_type = None
+              
+              if has_fault:
+                  fault_types = ["hotspot", "junction_box_failure", "poor_ventilation"]
+                  fault_type = random.choice(fault_types)
+                  
+                  if fault_type == "hotspot":
+                      panel_temperature += random.uniform(15, 30)  # Hotspots can be 15-30°C above normal
+                  elif fault_type == "junction_box_failure":
+                      panel_temperature += random.uniform(10, 20)  # Junction box failures cause heating
+                  elif fault_type == "poor_ventilation":
+                      panel_temperature += random.uniform(5, 15)  # Poor ventilation increases temperature
+              
+              return {
+                  "sensor_id": SENSOR_ID,
+                  "sensor_type": "temperature",
+                  "location_code": LOCATION_CODE,
+                  "timestamp": datetime.now().isoformat(),
+                  "value": round(panel_temperature, 2),
+                  "unit": "°C",
+                  "metadata": {
+                      "fault_detected": has_fault,
+                      "fault_type": fault_type,
+                      "ambient_temperature": round(base_ambient_temp, 2)
+                  }
+              }
+
+          def send_sensor_data(data):
+              """Send sensor data to the collector service."""
+              try:
+                  response = requests.post(DATA_COLLECTOR_URL, json=data)
+                  if response.status_code == 200:
+                      logger.info(f"Successfully sent data: {data['value']} {data['unit']}")
+                      return True
+                  else:
+                      logger.error(f"Failed to send data: HTTP {response.status_code}")
+                      return False
+              except requests.RequestException as e:
+                  logger.error(f"Error sending data: {e}")
+                  return False
+
+          def main():
+              """Main function to generate and send sensor data."""
+              logger.info(f"Starting temperature sensor {SENSOR_ID} at location {LOCATION_CODE}")
+              logger.info(f"Sending data to {DATA_COLLECTOR_URL} every {SEND_INTERVAL_SECONDS} seconds")
+              
+              while True:
+                  try:
+                      data = generate_temperature_data()
+                      send_sensor_data(data)
+                  except Exception as e:
+                      logger.error(f"Unexpected error: {e}")
+                  
+                  time.sleep(SEND_INTERVAL_SECONDS)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          python /app/sensor.py
+        env:
+        - name: SENSOR_TYPE
+          value: "temperature"
+        - name: LOCATION_CODE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: DATA_COLLECTOR_URL
+          value: "http://data-collector-service:8080/sensor-data"
+        - name: SEND_INTERVAL_SECONDS
+          value: "5"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thermal-imaging-sensor
+  namespace: solar-panel-detection
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sensor
+      type: thermal-imaging
+  template:
+    metadata:
+      labels:
+        app: sensor
+        type: thermal-imaging
+    spec:
+      containers:
+      - name: thermal-imaging-sensor
+        image: python:3.9-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install requests numpy && 
+          mkdir -p /app && 
+          cat > /app/sensor.py << 'EOF'
+          import time
+          import random
+          import requests
+          import os
+          import json
+          import uuid
+          import logging
+          import numpy as np
+          from datetime import datetime
+          import base64
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger('thermal-imaging-sensor')
+
+          # Configuration
+          SENSOR_ID = os.environ.get('SENSOR_ID', str(uuid.uuid4())[:8])
+          LOCATION_CODE = os.environ.get('LOCATION_CODE', 'A1')
+          PANEL_ID = os.environ.get('PANEL_ID', 'P1')
+          DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080/sensor-data')
+          SEND_INTERVAL_SECONDS = int(os.environ.get('SEND_INTERVAL_SECONDS', '60'))  # Thermal scans less frequent
+
+          # Panel dimensions (simplified)
+          PANEL_ROWS = 10
+          PANEL_COLS = 6
+
+          def generate_thermal_image_data():
+              """
+              Generate simulated thermal imaging data.
+              
+              Thermal imaging produces a temperature map of the panel surface.
+              For simplicity, we'll generate a 2D array of temperatures in Celsius.
+              """
+              # Get base temperature based on time of day
+              current_hour = datetime.now().hour
+              
+              if 6 <= current_hour < 12:  # Morning
+                  base_temp = random.uniform(30, 45)
+              elif 12 <= current_hour < 18:  # Afternoon
+                  base_temp = random.uniform(40, 60)
+              elif 18 <= current_hour < 21:  # Evening
+                  base_temp = random.uniform(25, 40)
+              else:  # Night
+                  base_temp = random.uniform(10, 25)
+              
+              # Create a baseline thermal image (all cells similar temperature)
+              thermal_image = np.random.normal(base_temp, 2.0, (PANEL_ROWS, PANEL_COLS))
+              
+              # Simulate a defect probability
+              has_defect = random.random() < 0.2  # 20% chance of having a defect
+              defect_info = None
+              
+              if has_defect:
+                  defect_types = [
+                      "hotspot", 
+                      "cell_crack", 
+                      "bypass_diode_failure", 
+                      "delamination", 
+                      "potential_induced_degradation"
+                  ]
+                  
+                  defect_type = random.choice(defect_types)
+                  
+                  # Generate coordinates for the defect
+                  defect_row = random.randint(0, PANEL_ROWS - 1)
+                  defect_col = random.randint(0, PANEL_COLS - 1)
+                  
+                  if defect_type == "hotspot":
+                      # Create a hotspot (significantly higher temperature)
+                      hotspot_temp = base_temp + random.uniform(15, 30)
+                      thermal_image[defect_row, defect_col] = hotspot_temp
+                      # And affect neighboring cells slightly
+                      for dr in [-1, 0, 1]:
+                          for dc in [-1, 0, 1]:
+                              if (0 <= defect_row + dr < PANEL_ROWS and 
+                                  0 <= defect_col + dc < PANEL_COLS and
+                                  (dr != 0 or dc != 0)):
+                                  thermal_image[defect_row + dr, defect_col + dc] += random.uniform(5, 10)
+                                  
+                      defect_info = {
+                          "type": "hotspot",
+                          "location": {"row": defect_row, "col": defect_col},
+                          "temperature": float(thermal_image[defect_row, defect_col]),
+                          "severity": "high" if hotspot_temp - base_temp > 25 else "medium"
+                      }
+                      
+                  elif defect_type == "cell_crack":
+                      # Cell cracks show as linear temperature differences
+                      if random.choice([True, False]):  # Horizontal crack
+                          for c in range(PANEL_COLS):
+                              thermal_image[defect_row, c] += random.uniform(3, 8)
+                      else:  # Vertical crack
+                          for r in range(PANEL_ROWS):
+                              thermal_image[r, defect_col] += random.uniform(3, 8)
+                              
+                      defect_info = {
+                          "type": "cell_crack",
+                          "location": {"row": defect_row, "col": defect_col},
+                          "orientation": "horizontal" if random.choice([True, False]) else "vertical",
+                          "severity": "medium"
+                      }
+                      
+                  elif defect_type == "bypass_diode_failure":
+                      # Affects an entire row or column with higher temperature
+                      if random.choice([True, False]):  # Horizontal
+                          for c in range(PANEL_COLS):
+                              thermal_image[defect_row, c] += random.uniform(10, 15)
+                      else:  # Vertical
+                          for r in range(PANEL_ROWS):
+                              thermal_image[r, defect_col] += random.uniform(10, 15)
+                              
+                      defect_info = {
+                          "type": "bypass_diode_failure",
+                          "location": {"row": defect_row, "col": defect_col},
+                          "orientation": "horizontal" if random.choice([True, False]) else "vertical",
+                          "severity": "high"
+                      }
+                      
+                  elif defect_type == "delamination":
+                      # Creates a cooler area (air between layers)
+                      area_size = random.randint(2, 4)
+                      for dr in range(min(area_size, PANEL_ROWS - defect_row)):
+                          for dc in range(min(area_size, PANEL_COLS - defect_col)):
+                              thermal_image[defect_row + dr, defect_col + dc] -= random.uniform(5, 10)
+                              
+                      defect_info = {
+                          "type": "delamination",
+                          "location": {"row": defect_row, "col": defect_col},
+                          "area_size": area_size,
+                          "severity": "medium"
+                      }
+                      
+                  elif defect_type == "potential_induced_degradation":
+                      # Creates a pattern of cells with higher temperatures around the edges
+                      for r in range(PANEL_ROWS):
+                          for c in range(PANEL_COLS):
+                              if r == 0 or r == PANEL_ROWS - 1 or c == 0 or c == PANEL_COLS - 1:
+                                  thermal_image[r, c] += random.uniform(8, 12)
+                                  
+                      defect_info = {
+                          "type": "potential_induced_degradation",
+                          "location": "panel_edges",
+                          "severity": "medium"
+                      }
+              
+              # Calculate statistics
+              min_temp = np.min(thermal_image)
+              max_temp = np.max(thermal_image)
+              avg_temp = np.mean(thermal_image)
+              temp_diff = max_temp - min_temp
+              
+              # Convert thermal image to a base64 string (normally

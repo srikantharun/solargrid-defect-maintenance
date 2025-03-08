@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-collector-service
+  namespace: solar-panel-detection
+spec:
+  selector:
+    app: data-collector
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: solar-panel-detection
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: solar-panel-detection
+spec:
+  selector:
+    app: mongodb
+  ports:
+  - port: 27017
+    targetPort: 27017
+  type: ClusterIP
