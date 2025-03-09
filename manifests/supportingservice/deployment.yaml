@@ -364,8 +364,8 @@ spec:
         command: ["/bin/bash", "-c"]
         args:
         - |
-          pip install flask requests redis pymongo numpy pandas scikit-learn joblib kafka-python && 
-          mkdir -p /app && 
+          pip install flask requests redis pymongo numpy pandas scikit-learn joblib kafka-python prometheus_client && 
+          mkdir -p /app /models && 
           cat > /app/processor.py << 'EOF'
           import os
           import json
@@ -381,9 +381,9 @@ spec:
           import requests
           import joblib
           import redis
-          from kafka import KafkaConsumer
-          import tensorflow as tf
           from tensorflow.keras.models import load_model
+          import prometheus_client
+          from prometheus_client import Counter, Gauge, Histogram, Summary
 
           # Configure logging
           logging.basicConfig(
@@ -396,12 +396,10 @@ spec:
           REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
           REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
           DATA_COLLECTOR_URL = os.environ.get('DATA_COLLECTOR_URL', 'http://data-collector-service:8080')
-          KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092')
-          KAFKA_TOPIC = os.environ.get('KAFKA_TOPIC', 'sensor-data')
-          USE_KAFKA = os.environ.get('USE_KAFKA', 'false').lower() == 'true'
           MODEL_DIR = os.environ.get('MODEL_DIR', '/models')
           API_PORT = int(os.environ.get('API_PORT', '8081'))
           PROCESSING_INTERVAL = int(os.environ.get('PROCESSING_INTERVAL', '300'))  # 5 minutes
+          METRICS_PORT = int(os.environ.get('METRICS_PORT', '9102'))
 
           # Flask application
           app = Flask(__name__)
@@ -411,6 +409,13 @@ spec:
           anomaly_detector = None
           thermal_model = None
           panel_status_cache = {}
+
+          # Prometheus metrics
+          defects_detected = Counter('solar_panel_defects', 'Number of defects detected', ['defect_type', 'severity'])
+          panel_temperature = Gauge('solar_panel_temperature', 'Current panel temperature')
+          panel_irradiance = Gauge('solar_panel_irradiance', 'Current panel irradiance')
+          panel_efficiency = Gauge('solar_panel_efficiency', 'Current panel efficiency')
+          analysis_duration = Histogram('solar_panel_analysis_duration', 'Time spent on analysis')
 
           # Initialize connections and models
           def init():
@@ -438,6 +443,10 @@ spec:
                           contamination=0.05,
                           random_state=42
                       )
+                      # Save the model for future use
+                      os.makedirs(MODEL_DIR, exist_ok=True)
+                      joblib.dump(anomaly_detector, model_path)
+                      logger.info(f"Created and saved anomaly detection model to {model_path}")
               except Exception as e:
                   logger.error(f"Error with anomaly detection model: {e}")
                   anomaly_detector = None
@@ -453,6 +462,9 @@ spec:
               except Exception as e:
                   logger.error(f"Error loading thermal imaging model: {e}")
                   thermal_model = None
+              
+              # Start Prometheus metrics server
+              start_metrics_server()
 
           # Rule-based defect detection functions
           def analyze_temperature_data(data, location_code, panel_id):
@@ -489,7 +501,11 @@ spec:
                       defect_type = "thermal_anomaly"
                       severity = "medium"
               
+              # Update Prometheus metrics
+              panel_temperature.set(temperature)
+              
               if is_defect:
+                  defects_detected.labels(defect_type=defect_type, severity=severity).inc()
                   return {
                       "location_code": location_code,
                       "panel_id": panel_id,
@@ -511,6 +527,16 @@ spec:
               is_defect = False
               defect_type = None
               severity = "low"
+              
+              # Update Prometheus metrics
+              panel_irradiance.set(irradiance)
+              
+              # Calculate efficiency (simplified)
+              if temp_data and 'value' in temp_data:
+                  temperature = temp_data['value']
+                  # Simple efficiency model: decreases with temperature
+                  efficiency = max(0, min(100, 100 - (temperature - 25) * 0.5))
+                  panel_efficiency.set(efficiency)
               
               # Check for low irradiance vs high temperature
               if temp_data and 'value' in temp_data:
@@ -535,6 +561,7 @@ spec:
                   severity = "medium"
               
               if is_defect:
+                  defects_detected.labels(defect_type=defect_type, severity=severity).inc()
                   return {
                       "location_code": location_code,
                       "panel_id": panel_id,
@@ -570,6 +597,7 @@ spec:
                   severity = "medium"
               
               if is_defect:
+                  defects_detected.labels(defect_type=defect_type, severity=severity).inc()
                   return {
                       "location_code": location_code,
                       "panel_id": panel_id,
@@ -605,6 +633,7 @@ spec:
                   severity = "high" if defect_type == "mounting_issue" else "medium"
               
               if is_defect:
+                  defects_detected.labels(defect_type=defect_type, severity=severity).inc()
                   return {
                       "location_code": location_code,
                       "panel_id": panel_id,
@@ -616,6 +645,392 @@ spec:
                   }
               
               return None
+
+          def analyze_thermal_image(data, location_code, panel_id):
+              """Analyze thermal imaging data for defects."""
+              if not data or 'thermal_data' not in data:
+                  return None
+              
+              thermal_data = data['thermal_data']
+              has_defect = data.get('defect_detected', False)
+              defect_info = data.get('defect_info')
+              
+              # If the thermal imaging sensor has already detected a defect, use that
+              if has_defect and defect_info:
+                  defect_type = defect_info.get('type', 'unknown_defect')
+                  severity = defect_info.get('severity', 'medium')
+                  
+                  defects_detected.labels(defect_type=defect_type, severity=severity).inc()
+                  
+                  return {
+                      "location_code": location_code,
+                      "panel_id": panel_id,
+                      "identified_defect": defect_type,
+                      "severity": severity,
+                      "temperature_difference": thermal_data.get('temperature_difference'),
+                      "max_temperature": thermal_data.get('max_temperature'),
+                      "confidence": 0.85,  # Higher confidence for thermal image detection
+                      "defect_location": defect_info.get('location'),
+                      "possible_solution": get_solution_for_defect(defect_type, severity)
+                  }
+              
+              # Otherwise, do our own analysis based on the thermal statistics
+              if 'temperature_difference' in thermal_data and thermal_data['temperature_difference'] > 20:
+                  defect_type = "potential_hotspot"
+                  severity = "medium"
+                  
+                  defects_detected.labels(defect_type=defect_type, severity=severity).inc()
+                  
+                  return {
+                      "location_code": location_code,
+                      "panel_id": panel_id,
+                      "identified_defect": defect_type,
+                      "severity": severity,
+                      "temperature_difference": thermal_data.get('temperature_difference'),
+                      "max_temperature": thermal_data.get('max_temperature'),
+                      "confidence": 0.7,
+                      "possible_solution": get_solution_for_defect(defect_type, severity)
+                  }
+              
+              return None
+
+          def get_solution_for_defect(defect_type, severity):
+              """Get recommended solution for a specific defect type."""
+              solutions = {
+                  "overheating": {
+                      "high": "Immediate inspection required. Disconnect the panel from the system.",
+                      "medium": "Schedule inspection within 48 hours. Check for ventilation issues."
+                  },
+                  "high_temperature": {
+                      "high": "Immediate cooling required. Inspect for hotspots.",
+                      "medium": "Monitor closely and schedule inspection within 72 hours."
+                  },
+                  "hotspot": {
+                      "high": "Immediate inspection required. May need panel replacement.",
+                      "medium": "Schedule thermal imaging within 48 hours. Check for shading issues."
+                  },
+                  "thermal_anomaly": {
+                      "high": "Immediate inspection with thermal camera.",
+                      "medium": "Schedule inspection within 72 hours."
+                  },
+                  "temp_irradiance_mismatch": {
+                      "high": "Inspect for internal electrical issues.",
+                      "medium": "Schedule maintenance to check connections and bypass diodes."
+                  },
+                  "potential_dust_accumulation": {
+                      "high": "Immediate cleaning required.",
+                      "medium": "Schedule cleaning within the week."
+                  },
+                  "cell_crack": {
+                      "high": "Panel replacement recommended.",
+                      "medium": "Monitor performance, may need replacement if efficiency drops further."
+                  },
+                  "bypass_diode_failure": {
+                      "high": "Replace bypass diode immediately to prevent panel damage.",
+                      "medium": "Schedule replacement of bypass diode within the week."
+                  },
+                  "delamination": {
+                      "high": "Panel replacement required.",
+                      "medium": "Monitor closely, plan for replacement if spreading."
+                  },
+                  "potential_induced_degradation": {
+                      "high": "Check system grounding and voltage configuration.",
+                      "medium": "Schedule electrical testing for the array."
+                  },
+                  "high_humidity_exposure": {
+                      "high": "Check for moisture ingress, seal or replace if necessary.",
+                      "medium": "Monitor for moisture accumulation during humid conditions."
+                  },
+                  "high_wind_stress": {
+                      "high": "Immediate inspection of mounting system required.",
+                      "medium": "Schedule structural inspection within the week."
+                  },
+                  "potential_hotspot": {
+                      "high": "Immediate thermal inspection required.",
+                      "medium": "Schedule detailed thermal scan within 72 hours."
+                  }
+              }
+              
+              if defect_type in solutions and severity in solutions[defect_type]:
+                  return solutions[defect_type][severity]
+              
+              # Default solution if specific one not found
+              if severity == "high":
+                  return "Immediate inspection required."
+              elif severity == "medium":
+                  return "Schedule inspection within 72 hours."
+              else:
+                  return "Monitor during next regular maintenance."
+
+          def process_panel_data(panel_id, location_code):
+              """Process all available data for a specific panel."""
+              try:
+                  # Get all sensor data for this panel
+                  response = requests.get(f"{DATA_COLLECTOR_URL}/panel/{panel_id}")
+                  if response.status_code != 200:
+                      logger.error(f"Failed to get data for panel {panel_id}: HTTP {response.status_code}")
+                      return None
+                  
+                  panel_data = response.json()
+                  
+                  # Extract data by sensor type
+                  temp_data = None
+                  irr_data = None
+                  hum_data = None
+                  wind_data = None
+                  thermal_data = None
+                  
+                  for item in panel_data:
+                      if item['sensor_type'] == 'temperature':
+                          temp_data = item
+                      elif item['sensor_type'] == 'irradiance':
+                          irr_data = item
+                      elif item['sensor_type'] == 'humidity':
+                          hum_data = item
+                      elif item['sensor_type'] == 'wind_speed':
+                          wind_data = item
+                      elif item['sensor_type'] == 'thermal_imaging':
+                          thermal_data = item
+                  
+                  # Analyze each sensor type
+                  defects = []
+                  
+                  temp_defect = analyze_temperature_data(temp_data, location_code, panel_id)
+                  if temp_defect:
+                      defects.append(temp_defect)
+                  
+                  irr_defect = analyze_irradiance_data(irr_data, temp_data, location_code, panel_id)
+                  if irr_defect:
+                      defects.append(irr_defect)
+                  
+                  hum_defect = analyze_humidity_data(hum_data, location_code, panel_id)
+                  if hum_defect:
+                      defects.append(hum_defect)
+                  
+                  wind_defect = analyze_wind_data(wind_data, location_code, panel_id)
+                  if wind_defect:
+                      defects.append(wind_defect)
+                  
+                  thermal_defect = analyze_thermal_image(thermal_data, location_code, panel_id)
+                  if thermal_defect:
+                      defects.append(thermal_defect)
+                  
+                  # Integration with anomaly detector (machine learning)
+                  if anomaly_detector and temp_data and irr_data:
+                      try:
+                          # Extract features for anomaly detection
+                          features = np.array([[
+                              temp_data['value'],
+                              irr_data['value'],
+                              temp_data['value'] / (irr_data['value'] + 1e-5)  # Temperature/irradiance ratio
+                          ]])
+                          
+                          # Predict anomaly (-1 for anomalies, 1 for normal)
+                          prediction = anomaly_detector.predict(features)
+                          
+                          if prediction[0] == -1:
+                              # This is an anomaly according to the model
+                              anomaly_score = anomaly_detector.score_samples(features)[0]
+                              
+                              # Only report if confidence is high enough (lower scores = more anomalous)
+                              if anomaly_score < -0.5:
+                                  anomaly_defect = {
+                                      "location_code": location_code,
+                                      "panel_id": panel_id,
+                                      "identified_defect": "anomalous_behavior",
+                                      "severity": "medium",
+                                      "anomaly_score": float(anomaly_score),
+                                      "confidence": min(0.9, 0.6 - anomaly_score/2),  # Convert score to confidence
+                                      "possible_solution": "Detailed inspection recommended due to unusual sensor readings."
+                                  }
+                                  defects.append(anomaly_defect)
+                                  defects_detected.labels(defect_type="anomalous_behavior", severity="medium").inc()
+                      except Exception as e:
+                          logger.error(f"Error in anomaly detection: {e}")
+                  
+                  # Update panel status cache
+                  panel_status_cache[panel_id] = {
+                      "last_analyzed": datetime.now().isoformat(),
+                      "location_code": location_code,
+                      "temperature": temp_data['value'] if temp_data else None,
+                      "irradiance": irr_data['value'] if irr_data else None,
+                      "defects_found": len(defects),
+                      "status": "alert" if defects else "normal"
+                  }
+                  
+                  # If using Redis, store the results
+                  if redis_client:
+                      redis_client.set(
+                          f"panel:{panel_id}:analysis", 
+                          json.dumps({
+                              "timestamp": datetime.now().isoformat(),
+                              "defects": defects,
+                              "status": "alert" if defects else "normal"
+                          }),
+                          ex=86400  # Expire after 24 hours
+                      )
+                  
+                  return {
+                      "panel_id": panel_id,
+                      "location_code": location_code,
+                      "analyzed_at": datetime.now().isoformat(),
+                      "defects": defects,
+                      "status": "alert" if defects else "normal"
+                  }
+              
+              except Exception as e:
+                  logger.error(f"Error processing panel data: {e}")
+                  return {
+                      "panel_id": panel_id,
+                      "error": str(e),
+                      "status": "error"
+                  }
+
+          def background_processing():
+              """Background thread to periodically analyze all panels."""
+              while True:
+                  try:
+                      logger.info("Starting background analysis of all panels")
+                      
+                      # Get a list of all panels from the data collector
+                      # This is simplified - in a real system, we would need to query for all active panels
+                      # For now, we'll process any panels that have recent data
+                      all_panels = {}
+                      
+                      try:
+                          # Attempt to get recent defects which might contain panel IDs
+                          response = requests.get(f"{DATA_COLLECTOR_URL}/defects/recent")
+                          if response.status_code == 200:
+                              defects = response.json()
+                              for defect in defects:
+                                  if 'panel_id' in defect and 'location_code' in defect:
+                                      all_panels[defect['panel_id']] = defect['location_code']
+                      except Exception as e:
+                          logger.error(f"Error getting recent defects: {e}")
+                      
+                      # Process each panel
+                      for panel_id, location_code in all_panels.items():
+                          try:
+                              result = process_panel_data(panel_id, location_code)
+                              if result:
+                                  logger.info(f"Analyzed panel {panel_id}: found {len(result.get('defects', []))} defects")
+                          except Exception as e:
+                              logger.error(f"Error analyzing panel {panel_id}: {e}")
+                      
+                      logger.info(f"Background analysis complete. Processed {len(all_panels)} panels")
+                  except Exception as e:
+                      logger.error(f"Error in background processing: {e}")
+                  
+                  # Sleep until next processing cycle
+                  time.sleep(PROCESSING_INTERVAL)
+
+          def start_metrics_server():
+              """Start the Prometheus metrics server."""
+              try:
+                  prometheus_client.start_http_server(METRICS_PORT)
+                  logger.info(f"Started Prometheus metrics server on port {METRICS_PORT}")
+              except Exception as e:
+                  logger.error(f"Failed to start Prometheus metrics server: {e}")
+
+          # API routes
+          @app.route('/panel/<panel_id>/defects', methods=['GET'])
+          def get_panel_defects(panel_id):
+              """Get defects for a specific panel."""
+              if redis_client:
+                  cached_analysis = redis_client.get(f"panel:{panel_id}:analysis")
+                  if cached_analysis:
+                      analysis = json.loads(cached_analysis)
+                      return jsonify(analysis.get('defects', []))
+              
+              # No cached data available
+              return jsonify([])
+
+          @app.route('/panel/<panel_id>/analysis', methods=['POST'])
+          def analyze_panel(panel_id):
+              """Trigger analysis for a specific panel."""
+              location_code = request.args.get('location_code', 'unknown')
+              
+              result = process_panel_data(panel_id, location_code)
+              if result:
+                  return jsonify(result)
+              else:
+                  return jsonify({"error": "Failed to analyze panel"}), 500
+
+          @app.route('/panels/status', methods=['GET'])
+          def get_panels_status():
+              """Get status of all analyzed panels."""
+              return jsonify(panel_status_cache)
+
+          @app.route('/defects/summary', methods=['GET'])
+          def get_defects_summary():
+              """Get a summary of all defects."""
+              defect_counts = {}
+              panels_with_defects = set()
+              
+              # Analyze cached panel statuses
+              for panel_id, status in panel_status_cache.items():
+                  if status.get('status') == 'alert':
+                      panels_with_defects.add(panel_id)
+              
+              # If using Redis, check for detailed defect information
+              if redis_client:
+                  for panel_id in panels_with_defects:
+                      cached_analysis = redis_client.get(f"panel:{panel_id}:analysis")
+                      if cached_analysis:
+                          analysis = json.loads(cached_analysis)
+                          for defect in analysis.get('defects', []):
+                              defect_type = defect.get('identified_defect', 'unknown')
+                              severity = defect.get('severity', 'unknown')
+                              
+                              key = f"{defect_type}:{severity}"
+                              if key in defect_counts:
+                                  defect_counts[key]['count'] += 1
+                              else:
+                                  defect_counts[key] = {
+                                      'defect_type': defect_type,
+                                      'severity': severity,
+                                      'count': 1
+                                  }
+              
+              summary = {
+                  "total_panels_analyzed": len(panel_status_cache),
+                  "panels_with_defects": len(panels_with_defects),
+                  "defect_distribution": list(defect_counts.values()),
+                  "timestamp": datetime.now().isoformat()
+              }
+              
+              return jsonify(summary)
+              
+          @app.route('/health', methods=['GET'])
+          def health_check():
+              """Health check endpoint."""
+              return jsonify({
+                  "status": "ok",
+                  "redis_connected": redis_client is not None,
+                  "models_loaded": {
+                      "anomaly_detector": anomaly_detector is not None,
+                      "thermal_model": thermal_model is not None
+                  },
+                  "panels_analyzed": len(panel_status_cache),
+                  "timestamp": datetime.now().isoformat()
+              })
+
+          def main():
+              """Main function to start the AI processor."""
+              logger.info("Starting AI Processor")
+              
+              # Initialize connections and models
+              init()
+              
+              # Start background processing thread
+              threading.Thread(target=background_processing, daemon=True).start()
+              
+              # Start the API server
+              logger.info(f"Starting API server on port {API_PORT}")
+              app.run(host='0.0.0.0', port=API_PORT)
+
+          if __name__ == "__main__":
+              main()
           EOF
           python /app/processor.py
         env:
@@ -627,8 +1042,8 @@ spec:
           value: "/models"
         - name: PROCESSING_INTERVAL
           value: "300"
-        - name: USE_KAFKA
-          value: "false"
+        - name: METRICS_PORT
+          value: "9102"
         ports:
         - containerPort: 8081
         - containerPort: 9102

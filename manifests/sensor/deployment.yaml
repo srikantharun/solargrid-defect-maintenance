@@ -486,4 +486,80 @@ spec:
               avg_temp = np.mean(thermal_image)
               temp_diff = max_temp - min_temp
               
-              # Convert thermal image to a base64 string (normally
+              # Convert thermal image to a base64 string (simulated for demonstration)
+              # In a real system, this would be an actual compressed thermal image
+              thermal_data_base64 = base64.b64encode(np.array(thermal_image).tobytes()).decode('utf-8')
+              
+              return {
+                  "sensor_id": SENSOR_ID,
+                  "sensor_type": "thermal_imaging",
+                  "location_code": LOCATION_CODE,
+                  "panel_id": PANEL_ID,
+                  "timestamp": datetime.now().isoformat(),
+                  "thermal_data": {
+                      "min_temperature": float(min_temp),
+                      "max_temperature": float(max_temp),
+                      "avg_temperature": float(avg_temp),
+                      "temperature_difference": float(temp_diff),
+                      "resolution": {
+                          "rows": PANEL_ROWS,
+                          "cols": PANEL_COLS
+                      }
+                  },
+                  "defect_detected": has_defect,
+                  "defect_info": defect_info,
+                  "image_data_size": len(thermal_data_base64)  # We don't send actual image
+              }
+
+          def send_sensor_data(data):
+              """Send sensor data to the collector service."""
+              try:
+                  response = requests.post(DATA_COLLECTOR_URL, json=data)
+                  if response.status_code == 200:
+                      logger.info(f"Successfully sent thermal data: panel {data['panel_id']}, defect detected: {data['defect_detected']}")
+                      return True
+                  else:
+                      logger.error(f"Failed to send data: HTTP {response.status_code}")
+                      return False
+              except requests.RequestException as e:
+                  logger.error(f"Error sending data: {e}")
+                  return False
+
+          def main():
+              """Main function to generate and send sensor data."""
+              logger.info(f"Starting thermal imaging sensor {SENSOR_ID} at location {LOCATION_CODE} for panel {PANEL_ID}")
+              logger.info(f"Sending data to {DATA_COLLECTOR_URL} every {SEND_INTERVAL_SECONDS} seconds")
+              
+              while True:
+                  try:
+                      data = generate_thermal_image_data()
+                      send_sensor_data(data)
+                  except Exception as e:
+                      logger.error(f"Unexpected error: {e}")
+                  
+                  time.sleep(SEND_INTERVAL_SECONDS)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          python /app/sensor.py
+        env:
+        - name: SENSOR_TYPE
+          value: "thermal_imaging"
+        - name: LOCATION_CODE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: PANEL_ID
+          value: "panel-$(HOSTNAME)"
+        - name: DATA_COLLECTOR_URL
+          value: "http://data-collector-service:8080/sensor-data"
+        - name: SEND_INTERVAL_SECONDS
+          value: "60"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
