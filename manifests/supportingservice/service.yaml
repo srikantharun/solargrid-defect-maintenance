@@ -1,4 +1,3 @@
-# manifests/supportingservice/service.yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -10,8 +9,7 @@ spec:
   ports:
   - port: 80
     targetPort: 8000
-    nodePort: 30080
-  type: NodePort  # Changed from LoadBalancer
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: Service

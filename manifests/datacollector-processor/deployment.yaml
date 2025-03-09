@@ -425,15 +425,3 @@ spec:
       - name: mongodb-data
         persistentVolumeClaim:
           claimName: mongodb-data
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mongodb-data
-  namespace: solar-panel-detection
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 2Gi
