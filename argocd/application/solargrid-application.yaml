@@ -18,3 +18,11 @@ spec:
       selfHeal: true
     syncOptions:
     - CreateNamespace=true
+    - RespectIgnoreDifferences=true
+  # This section helps handle the storage class differences between environments
+  ignoreDifferences:
+  - group: ""
+    kind: PersistentVolumeClaim
+    jsonPointers:
+    - /spec/storageClassName
+    - /spec/volumeMode

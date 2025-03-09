@@ -1,6 +1,6 @@
-# Solar Farm Defect Detection System
+# Solar Farm Defect Detection System for K3s
 
-This repository contains Kubernetes manifests for deploying a solar panel defect detection system that uses various sensors and AI processing to identify, classify, and recommend solutions for solar panel defects. This design will be injected using light weight kubernetes K3s. To begin with project uses kubernetes k8s, later on will be quantized to 8-bit application
+This repository contains Kubernetes manifests for deploying a solar panel defect detection system on K3s - a lightweight Kubernetes distribution ideal for edge computing and IoT environments.
 
 ## System Architecture
 
@@ -22,59 +22,6 @@ The system is composed of the following main components:
 
 <img width="432" alt="image" src="https://github.com/user-attachments/assets/95890808-d422-4063-93fa-38b9a22c1e34" />
 
-
-## Repository Structure
-
-```
-├── README.md
-├── argocd
-│   ├── applications
-│   │   └── solargrid-app.yaml
-│   └── projects
-│       └── solargrid-project.yaml
-├── solarfarm-defect-management.md
-└── manifests
-    ├── configmap
-    │   ├── decision-engine-config.yaml
-    │   ├── decision-engine-scripts.yaml
-    │   ├── iec61850-config.yaml
-    │   ├── iec61850-data-generator.yaml
-    │   ├── ml-demo-configmap.yaml
-    │   ├── ml-processing-config.yaml
-    │   ├── opcua-config.yaml
-    │   ├── prometheus-exporter.yaml
-    │   └── scada-interface-handler.yaml
-    ├── sensor
-    │   ├── deployment.yaml
-    │   └── service.yaml
-    ├── microcontroller-simulator
-    │   ├── deployment.yaml
-    │   └── service.yaml
-    ├── datacollector-processor
-    │   ├── deployment.yaml
-    │   ├── grid-analytics-readme.md
-    │   └── service.yaml
-    ├── aiprocessor
-    │   ├── README.md
-    │   ├── namespace.yaml
-    │   ├── prometheus-basic.yaml
-    │   ├── prometheus-values.yaml
-    │   └── service-monitor.yaml
-    ├── namespace.yaml
-    ├── networking
-    │   ├── ec61850-simulator-policy.yaml
-    │   ├── ml-processing-policy.yaml
-    │   └── scada-interface-policy.yaml
-    ├── supportingservice
-    │   ├── deployment.yaml
-    │   └── service.yaml
-    ├── services
-    │   └── prometheus-exporter.yaml
-    └── storage
-        ├── iec61850-data-pvc.yaml
-        └── ml-model-storage-pvc.yaml
-```
-
 ## Key Features
 
 - Real-time defect detection using multiple sensor data sources
@@ -83,29 +30,55 @@ The system is composed of the following main components:
 - Microcontroller interface for hardware integration
 - Monitoring and visualization capabilities
 - Containerized deployments for easy scaling
+- Optimized for lightweight K3s deployment on edge devices
 - ArgoCD integration for GitOps deployment
 
-## Supported Defect Types
+## Hardware Requirements
 
-The system can detect various types of solar panel defects including:
+For a production-like K3s cluster, we recommend:
 
-- Hot spots
-- Cell cracks
-- Bypass diode failures
-- Delamination
-- Potential-induced degradation
-- Overheating
-- Dust/dirt accumulation
-- Moisture ingress
-- Mounting and structural issues
+- **Master Node**: 
+  - 2 CPU cores
+  - 2GB RAM minimum
+  - 20GB disk space
+  
+- **Worker Nodes** (at least one):
+  - 2 CPU cores
+  - 4GB RAM minimum
+  - 40GB disk space
+
+For a real solar farm deployment, we recommend additional worker nodes positioned near solar panel arrays for direct sensor connections.
+
+## K3s Setup
+
+### Master Node Setup
+
+1. Run the master setup script:
+   ```bash
+   chmod +x k3s-setup/install-k3s-master.sh
+   ./k3s-setup/install-k3s-master.sh
+   ```
+
+2. Make note of the node token and IP address displayed at the end of the installation.
+
+### Worker Node Setup
+
+1. Run the worker setup script with the master IP and token:
+   ```bash
+   chmod +x k3s-setup/install-k3s-agent.sh
+   ./k3s-setup/install-k3s-agent.sh <MASTER_IP> <NODE_TOKEN>
+   ```
+
+2. Verify the node joined the cluster:
+   ```bash
+   kubectl get nodes
+   ```
+
+### Rancher Management (Optional)
+
+For a management UI, install Rancher by following the instructions in `k3s-setup/rancher-setup.md`.
 
 ## Deployment
-
-### Prerequisites
-
-- Kubernetes cluster (1.19+)
-- kubectl configured to access your cluster
-- ArgoCD installed (optional for GitOps deployment)
 
 ### Standard Deployment
 
@@ -144,11 +117,17 @@ The system can detect various types of solar panel defects including:
 
 ### ArgoCD Deployment (GitOps)
 
-1. Install ArgoCD in your cluster (if not already installed)
+1. Install ArgoCD in your cluster:
+   ```bash
+   kubectl create namespace argocd
+   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+   ```
+
 2. Apply the project configuration:
    ```bash
    kubectl apply -f argocd/projects/solargrid-project.yaml
    ```
+
 3. Apply the application configuration:
    ```bash
    kubectl apply -f argocd/applications/solargrid-app.yaml
@@ -159,13 +138,13 @@ The system can detect various types of solar panel defects including:
 Once deployed, the API server will be available at:
 
 ```
-http://<your-load-balancer-ip>/api
+http://<any-node-ip>:30080/api
 ```
 
 For API documentation, visit:
 
 ```
-http://<your-load-balancer-ip>/api/documentation
+http://<any-node-ip>:30080/api/documentation
 ```
 
 ## Monitoring
@@ -181,6 +160,29 @@ Monitoring is provided through Prometheus and Grafana:
    ```bash
    kubectl port-forward -n solar-panel-detection svc/grafana 3000:80
    ```
+
+## Edge Optimization
+
+This deployment is optimized for edge environments with:
+
+1. Local storage using K3s's built-in local-path provisioner
+2. NodePort services instead of LoadBalancers
+3. Minimal resource requests
+4. Configurable data retention for limited storage scenarios
+
+## Supported Defect Types
+
+The system can detect various types of solar panel defects including:
+
+- Hot spots
+- Cell cracks
+- Bypass diode failures
+- Delamination
+- Potential-induced degradation
+- Overheating
+- Dust/dirt accumulation
+- Moisture ingress
+- Mounting and structural issues
 
 ## Documentation
 

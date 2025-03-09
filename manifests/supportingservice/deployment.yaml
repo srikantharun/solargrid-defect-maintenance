@@ -638,11 +638,11 @@ spec:
           mountPath: /models
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: "512Mi"
+            cpu: "250m"
           limits:
-            memory: "4Gi"
-            cpu: "2"
+            memory: "1Gi"
+            cpu: "1"
       volumes:
       - name: model-storage
         persistentVolumeClaim:

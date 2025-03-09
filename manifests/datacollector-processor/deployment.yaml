@@ -357,11 +357,11 @@ spec:
         - containerPort: 8080
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "128Mi"
+            cpu: "100m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "256Mi"
+            cpu: "250m"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -413,11 +413,11 @@ spec:
         - containerPort: 27017
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "128Mi"
+            cpu: "100m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "256Mi"
+            cpu: "250m"
         volumeMounts:
         - name: mongodb-data
           mountPath: /data/db
@@ -436,4 +436,4 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 5Gi
+      storage: 2Gi
