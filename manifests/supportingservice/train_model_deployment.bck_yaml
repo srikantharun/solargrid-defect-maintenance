@@ -11,7 +11,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: model-trainer
-        image: tensorflow/tensorflow:2.8.0  # Changed from GPU to CPU image
+        image: tensorflow/tensorflow:2.8.0-gpu
         command: ["/bin/bash", "-c"]
         args:
         - |
@@ -749,7 +749,8 @@ spec:
           secretName: kaggle-credentials
           defaultMode: 0600
       nodeSelector:
-        workload: ml  # Only using the workload label, removed GPU requirement
+        workload: ml
+        gpu: enabled
       tolerations:
       - key: "ml"
         operator: "Equal"
@@ -763,4 +764,4 @@ metadata:
   namespace: solar-panel-detection
 type: Opaque
 data:
-  kaggle.json: xxxxxxxxxxxxxxxxxxxxx
+  kaggle.json: xxxxxxxxxxx
