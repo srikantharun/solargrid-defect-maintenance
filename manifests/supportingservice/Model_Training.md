@@ -1,6 +1,6 @@
 # Pre-training And Transfer Learning Workflow
 
-I've created a Kubernetes Job definition for you that will handle the complete transfer learning workflow using the FLIR dataset. The job will:
+I've created a Kubernetes Job definition that will handle the complete transfer learning workflow using the FLIR dataset. The job will:
 
 1. Download and process the FLIR dataset:
 
