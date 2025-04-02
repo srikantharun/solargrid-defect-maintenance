@@ -265,4 +265,5 @@ Handles authentication and authorization
 Supports Swagger documentation
 
 
+![image](https://github.com/user-attachments/assets/04d45346-8186-4f7c-b2c4-c5dada4be071)
 
